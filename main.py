@@ -407,9 +407,9 @@ def init_db():
         conn = get_db()
         cursor = conn.cursor()
    
-        cursor.execute('DROP TABLE IF EXISTS diary_entries')
         cursor.execute('DROP TABLE IF EXISTS report_attachments')
         cursor.execute('DROP TABLE IF EXISTS reports')
+        cursor.execute('DROP TABLE IF EXISTS diary_entries')
         
         
         cursor.execute('''
@@ -679,18 +679,6 @@ def init_db():
                 processed_by INTEGER REFERENCES employees(id)
             )
         ''')
-      
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS report_attachments (
-                id SERIAL PRIMARY KEY,
-                report_id INTEGER REFERENCES reports(id) ON DELETE CASCADE,
-                original_filename TEXT NOT NULL,
-                stored_filename TEXT NOT NULL,
-                file_type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS reports (
                 id SERIAL PRIMARY KEY,
@@ -704,6 +692,19 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+      
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS report_attachments (
+                id SERIAL PRIMARY KEY,
+                report_id INTEGER REFERENCES reports(id) ON DELETE CASCADE,
+                original_filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS report_attachments (
