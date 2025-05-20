@@ -1,5 +1,9 @@
-fastapi 
-asyncpg 
-python-dotenv 
+fastapi
 uvicorn
-psycopg2'
+psycopg2
+pydantic
+python-multipart
+websockets
+uuid
+passlib[bcrypt]
+psycopg2-binary
