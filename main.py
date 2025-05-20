@@ -35,7 +35,6 @@ app.add_middleware(
     expose_headers=["Content-Disposition"]  # Important for file downloads
 )
 
-
 # Database connection
 DATABASE_URL=os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
 
@@ -65,6 +64,7 @@ class BudgetApprovalUpdate(BaseModel):
     status: str
     approved_by: str
     comments: Optional[str] = None
+
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,6 @@ def migrate_database():
         if conn:
             conn.close()
 
-
 # Initialize database tables
 def init_db():
     conn = None
@@ -122,9 +121,23 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-# Initialize database
-init_db()
-migrate_database()
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+# Initialize database on startup
+try:
+    init_db()
+    migrate_database()
+except Exception as e:
+    logger.error(f"Failed to initialize database: {e}")
+    raise
             
 @app.post("/budget-approvals/", response_model=BudgetApproval)
 def create_budget_approval(approval: BudgetApprovalCreate, requested_by: str = Header(...)):
