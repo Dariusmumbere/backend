@@ -37,7 +37,7 @@ app.add_middleware(
 
 
 # Database connection
-DATABASE_URL=os.getenv("DATABASE_URL", "postgresql://postgres_j1cc_user:8s7JdsJkqYb2kLzZ4hODsGDa5cSgzu5w@dpg-d0m8jahr0fns73cdb4p0-a/postgres_j1cc")
+DATABASE_URL=os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -179,7 +179,7 @@ class Donor(BaseModel):
     notes: Optional[str] = None
     category: Optional[str] = "one-time"
     created_at: Optional[datetime] = None
-    stats: Optional[Dict] = None 
+    stats: Optional[DonorStats] = None
 
 class DonationCreate(BaseModel):
     donor_name: str
@@ -363,13 +363,7 @@ class BankAccount(BaseModel):
     name: str
     account_number: str
     balance: float
-    
-class BudgetApproval(BaseModel):
-    activity_id: int
-    approved: bool
-    remarks: Optional[str] = None   
-
-
+   
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -733,16 +727,6 @@ def init_db():
                 name TEXT NOT NULL UNIQUE,
                 account_number TEXT NOT NULL,
                 balance FLOAT DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS budget_approvals (
-                id SERIAL PRIMARY KEY,
-                activity_id INTEGER REFERENCES activities(id),
-                approved BOOLEAN NOT NULL,
-                remarks TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_by INTEGER REFERENCES users(id)
             )
         ''')
         
@@ -2574,17 +2558,18 @@ def get_donor(donor_id: int):
         if not donor:
             raise HTTPException(status_code=404, detail="Donor not found")
             
-        # Get donor statistics from the stats JSON column
+        # Get donor statistics
         cursor.execute('''
-            SELECT stats FROM donors WHERE id = %s
+            SELECT 
+                COUNT(*) as donation_count,
+                COALESCE(SUM(amount), 0) as total_donated,
+                MIN(date) as first_donation,
+                MAX(date) as last_donation
+            FROM donations
+            WHERE donor_id = %s
         ''', (donor_id,))
         
-        stats = cursor.fetchone()[0] or {
-            "donation_count": 0,
-            "total_donated": 0,
-            "first_donation": None,
-            "last_donation": None
-        }
+        stats = cursor.fetchone()
         
         return {
             "id": donor[0],
@@ -2596,7 +2581,12 @@ def get_donor(donor_id: int):
             "notes": donor[6],
             "category": donor[7],
             "created_at": donor[8],
-            "stats": stats
+            "stats": {
+                "donation_count": stats[0] if stats else 0,
+                "total_donated": float(stats[1]) if stats else 0.0,
+                "first_donation": stats[2] if stats else None,
+                "last_donation": stats[3] if stats else None
+            }
         }
     except Exception as e:
         logger.error(f"Error fetching donor: {e}")
@@ -4428,199 +4418,6 @@ def reset_program_areas():
     finally:
         if conn:
             conn.close()
-
-@app.post("/budget-approvals/")
-def approve_budget(approval: BudgetApproval):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        # Get the activity and its budget
-        cursor.execute('''
-            SELECT a.id, a.budget, a.project_id, p.name as project_name 
-            FROM activities a
-            JOIN projects p ON a.project_id = p.id
-            WHERE a.id = %s
-        ''', (approval.activity_id,))
-        
-        activity = cursor.fetchone()
-        if not activity:
-            raise HTTPException(status_code=404, detail="Activity not found")
-            
-        activity_id, budget_amount, project_id, project_name = activity
-        
-        if approval.approved:
-            # Check if project has enough funds
-            cursor.execute('''
-                SELECT balance FROM program_areas WHERE name = %s
-            ''', (project_name,))
-            
-            program_balance = cursor.fetchone()
-            if not program_balance:
-                raise HTTPException(status_code=400, detail=f"Program area '{project_name}' not found")
-                
-            program_balance = program_balance[0]
-            
-            if program_balance < budget_amount:
-                raise HTTPException(status_code=400, detail="Insufficient funds in program area")
-                
-            # Deduct from program area
-            cursor.execute('''
-                UPDATE program_areas
-                SET balance = balance - %s
-                WHERE name = %s
-            ''', (budget_amount, project_name))
-            
-            # Deduct from main account
-            cursor.execute('''
-                UPDATE bank_accounts
-                SET balance = balance - %s
-                WHERE name = 'Main Account'
-            ''', (budget_amount,))
-            
-            # Update activity status
-            cursor.execute('''
-                UPDATE activities
-                SET status = 'approved'
-                WHERE id = %s
-            ''', (activity_id,))
-            
-            # Record the approval
-            cursor.execute('''
-                INSERT INTO budget_approvals (activity_id, approved, remarks)
-                VALUES (%s, %s, %s)
-            ''', (activity_id, True, approval.remarks))
-            
-            conn.commit()
-            
-            return {"message": "Budget approved and funds deducted successfully"}
-        else:
-            # Just record the rejection
-            cursor.execute('''
-                UPDATE activities
-                SET status = 'rejected'
-                WHERE id = %s
-            ''', (activity_id,))
-            
-            cursor.execute('''
-                INSERT INTO budget_approvals (activity_id, approved, remarks)
-                VALUES (%s, %s, %s)
-            ''', (activity_id, False, approval.remarks))
-            
-            conn.commit()
-            
-            return {"message": "Budget rejected"}
-            
-    except Exception as e:
-        logger.error(f"Error processing budget approval: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if conn:
-            conn.close()
-
-@app.post("/donations/with-stats/", response_model=Donation)
-def create_donation_with_stats(donation: DonationCreate):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        # First, get or create the donor
-        cursor.execute('''
-            SELECT id FROM donors WHERE name = %s
-        ''', (donation.donor_name,))
-        donor = cursor.fetchone()
-        
-        donor_id = None
-        if donor:
-            donor_id = donor[0]
-        else:
-            # Create a new donor if not exists
-            cursor.execute('''
-                INSERT INTO donors (name, donor_type, category)
-                VALUES (%s, 'individual', 'one-time')
-                RETURNING id
-            ''', (donation.donor_name,))
-            donor_id = cursor.fetchone()[0]
-        
-        # Insert donation with donor_id
-        cursor.execute('''
-            INSERT INTO donations (donor_id, donor_name, amount, payment_method, date, project, notes, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'completed')
-            RETURNING id, donor_name, amount, payment_method, date, project, notes, status, created_at
-        ''', (
-            donor_id,
-            donation.donor_name,
-            donation.amount,
-            donation.payment_method,
-            donation.date,
-            donation.project,
-            donation.notes
-        ))
-        
-        new_donation = cursor.fetchone()
-        
-        # Update donor statistics
-        cursor.execute('''
-            UPDATE donors
-            SET 
-                stats = jsonb_build_object(
-                    'donation_count', COALESCE((SELECT COUNT(*) FROM donations WHERE donor_id = donors.id), 0),
-                    'total_donated', COALESCE((SELECT SUM(amount) FROM donations WHERE donor_id = donors.id), 0),
-                    'first_donation', (SELECT MIN(date) FROM donations WHERE donor_id = donors.id),
-                    'last_donation', (SELECT MAX(date) FROM donations WHERE donor_id = donors.id)
-                )
-            WHERE id = %s
-        ''', (donor_id,))
-        
-        # Update the appropriate program area balance if project is specified
-        if donation.project:
-            cursor.execute('''
-                UPDATE program_areas
-                SET balance = balance + %s
-                WHERE name = %s
-                RETURNING balance
-            ''', (donation.amount, donation.project))
-            
-            if not cursor.fetchone():
-                raise HTTPException(status_code=400, detail=f"Program area '{donation.project}' not found")
-        
-        # Update main account balance
-        cursor.execute('''
-            UPDATE bank_accounts
-            SET balance = balance + %s
-            WHERE name = 'Main Account'
-            RETURNING balance
-        ''', (donation.amount,))
-        
-        if not cursor.fetchone():
-            raise HTTPException(status_code=500, detail="Main account not found")
-        
-        conn.commit()
-        
-        return {
-            "id": new_donation[0],
-            "donor_name": new_donation[1],
-            "amount": new_donation[2],
-            "payment_method": new_donation[3],
-            "date": new_donation[4],
-            "project": new_donation[5],
-            "notes": new_donation[6],
-            "status": new_donation[7],
-            "created_at": new_donation[8]
-        }
-    except Exception as e:
-        logger.error(f"Error creating donation with stats: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if conn:
-            conn.close()
-
 # Run the application
 if __name__ == "__main__":
     import uvicorn
