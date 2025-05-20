@@ -1,15 +1,29 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import UploadFile, File, Form, Header, Depends
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from datetime import date, datetime, timedelta
-from typing import List, Optional
-import asyncpg
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
+import psycopg2
+import logging
+import json
+from typing import List, Optional
+from datetime import date,datetime
+from typing import Dict
+import uuid
+import shutil
+from typing import List
+from pathlib import Path
+from passlib.context import CryptContext
+import secrets
+import string
 
 app = FastAPI()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # CORS configuration
 app.add_middleware(
@@ -18,267 +32,309 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"]  # Important for file downloads
 )
 
-# Database connection pool
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
-pool = None
 
-async def get_db():
-    global pool
-    if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL)
-    return pool
+# Database connection
+DATABASE_URL=os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
 
-# Models
-class SavingsGoal(BaseModel):
-    target_amount: float
-    current_amount: float
-    start_date: date
-    target_date: date
-    monthly_savings: float
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
 
-class SavingsTransaction(BaseModel):
-    amount: float
-    type: str  # 'deposit' or 'withdrawal'
-    date: date
-    description: Optional[str] = None
+# Pydantic models
+class BudgetApproval(BaseModel):
+    id: int
+    activity_id: int
+    activity_name: str
+    requested_amount: float
+    status: str  # "pending", "approved", "rejected"
+    requested_by: str
+    approved_by: Optional[str] = None
+    comments: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
-class AbstinenceTracker(BaseModel):
-    start_date: date
-    end_date: date
-    current_streak: int
-    longest_streak: int
-    total_days: int
+class BudgetApprovalCreate(BaseModel):
+    activity_id: int
+    requested_amount: float
+    comments: Optional[str] = None
 
-class AbstinenceCheckIn(BaseModel):
-    date: date
-    success: bool
-    notes: Optional[str] = None
+class BudgetApprovalUpdate(BaseModel):
+    status: str
+    approved_by: str
+    comments: Optional[str] = None
+# File storage setup
+UPLOAD_DIR = "uploads/fundraising"
+Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-class SavingsProgress(BaseModel):
-    progress_percent: float
-    months_remaining: int
-    monthly_savings: float
-    on_track: bool
+def migrate_database():
+    """Handle database schema migrations"""
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if donor_name column exists in donations table
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='donations' AND column_name='donor_name'
+        """)
+        if not cursor.fetchone():
+            # Add the donor_name column if it doesn't exist
+            cursor.execute("""
+                ALTER TABLE donations 
+                ADD COLUMN donor_name TEXT
+            """)
+            logger.info("Added donor_name column to donations table")
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error migrating database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
-class AbstinenceProgress(BaseModel):
-    days_completed: int
-    total_days_planned: int
-    days_remaining: int
-    success_rate: float
 
-# Database initialization
-async def initialize_db():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        # Create tables if they don't exist
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS savings_goal (
+# Initialize database tables
+def init_db():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS budget_approvals (
                 id SERIAL PRIMARY KEY,
-                target_amount NUMERIC NOT NULL,
-                current_amount NUMERIC NOT NULL,
-                start_date DATE NOT NULL,
-                target_date DATE NOT NULL,
-                monthly_savings NUMERIC NOT NULL
+                activity_id INTEGER REFERENCES activities(id),
+                activity_name TEXT NOT NULL,
+                requested_amount FLOAT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_by TEXT NOT NULL,
+                approved_by TEXT,
+                comments TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+# Initialize database
+init_db()
+migrate_database()
+            
+@app.post("/budget-approvals/", response_model=BudgetApproval)
+def create_budget_approval(approval: BudgetApprovalCreate, requested_by: str = Header(...)):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
         
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS savings_transactions (
-                id SERIAL PRIMARY KEY,
-                amount NUMERIC NOT NULL,
-                type VARCHAR(10) NOT NULL,
-                date DATE NOT NULL,
-                description TEXT
-            )
-        ''')
+        # Get activity details
+        cursor.execute('''
+            SELECT a.id, a.name, p.name as project_name 
+            FROM activities a
+            JOIN projects p ON a.project_id = p.id
+            WHERE a.id = %s
+        ''', (approval.activity_id,))
         
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS abstinence_tracker (
-                id SERIAL PRIMARY KEY,
-                start_date DATE NOT NULL,
-                end_date DATE NOT NULL,
-                current_streak INTEGER NOT NULL,
-                longest_streak INTEGER NOT NULL,
-                total_days INTEGER NOT NULL
-            )
-        ''')
+        activity = cursor.fetchone()
+        if not activity:
+            raise HTTPException(status_code=404, detail="Activity not found")
+            
+        activity_id, activity_name, project_name = activity
         
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS abstinence_checkins (
-                id SERIAL PRIMARY KEY,
-                date DATE NOT NULL UNIQUE,
-                success BOOLEAN NOT NULL,
-                notes TEXT
-            )
-        ''')
+        # Create approval request
+        cursor.execute('''
+            INSERT INTO budget_approvals 
+            (activity_id, activity_name, requested_amount, status, requested_by, comments)
+            VALUES (%s, %s, %s, 'pending', %s, %s)
+            RETURNING id, activity_id, activity_name, requested_amount, status, 
+                      requested_by, approved_by, comments, created_at, updated_at
+        ''', (
+            activity_id,
+            f"{activity_name} ({project_name})",
+            approval.requested_amount,
+            requested_by,
+            approval.comments
+        ))
         
-        # Initialize with default data if tables are empty
-        if await conn.fetchval("SELECT COUNT(*) FROM savings_goal") == 0:
-            start_date = date.today()
-            target_date = start_date + timedelta(days=19*30)  # 19 months
-            await conn.execute('''
-                INSERT INTO savings_goal (target_amount, current_amount, start_date, target_date, monthly_savings)
-                VALUES (100000000, 0, $1, $2, 5263157.89)
-            ''', start_date, target_date)
-        
-        if await conn.fetchval("SELECT COUNT(*) FROM abstinence_tracker") == 0:
-            start_date = date.today()
-            end_date = start_date + timedelta(days=19*30)  # 19 months
-            await conn.execute('''
-                INSERT INTO abstinence_tracker (start_date, end_date, current_streak, longest_streak, total_days)
-                VALUES ($1, $2, 0, 0, 0)
-            ''', start_date, end_date)
-
-@app.on_event("startup")
-async def startup():
-    await initialize_db()
-
-# Savings Goal Endpoints
-@app.get("/savings/goal/", response_model=SavingsGoal)
-async def get_savings_goal():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM savings_goal LIMIT 1")
-        if not row:
-            raise HTTPException(status_code=404, detail="Savings goal not found")
-        return dict(row)
-
-@app.get("/savings/progress/", response_model=SavingsProgress)
-async def get_savings_progress():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        goal = await conn.fetchrow("SELECT * FROM savings_goal LIMIT 1")
-        if not goal:
-            raise HTTPException(status_code=404, detail="Savings goal not found")
-        
-        today = date.today()
-        total_days = (goal['target_date'] - goal['start_date']).days
-        days_passed = (today - goal['start_date']).days
-        months_remaining = max(0, (goal['target_date'] - today).days // 30)
-        
-        expected_progress = days_passed / total_days if total_days > 0 else 0
-        actual_progress = goal['current_amount'] / goal['target_amount'] if goal['target_amount'] > 0 else 0
+        new_approval = cursor.fetchone()
+        conn.commit()
         
         return {
-            "progress_percent": round(actual_progress * 100, 2),
-            "months_remaining": months_remaining,
-            "monthly_savings": goal['monthly_savings'],
-            "on_track": actual_progress >= expected_progress
+            "id": new_approval[0],
+            "activity_id": new_approval[1],
+            "activity_name": new_approval[2],
+            "requested_amount": new_approval[3],
+            "status": new_approval[4],
+            "requested_by": new_approval[5],
+            "approved_by": new_approval[6],
+            "comments": new_approval[7],
+            "created_at": new_approval[8],
+            "updated_at": new_approval[9]
         }
+    except Exception as e:
+        logger.error(f"Error creating budget approval: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
 
-@app.get("/savings/transactions/", response_model=List[dict])
-async def get_savings_transactions():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM savings_transactions ORDER BY date DESC")
-        return [dict(row) for row in rows]
-
-@app.post("/savings/transaction/")
-async def create_savings_transaction(transaction: SavingsTransaction):
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        # Update current amount in savings goal
-        amount = transaction.amount if transaction.type == 'deposit' else -transaction.amount
-        await conn.execute('''
-            UPDATE savings_goal 
-            SET current_amount = current_amount + $1
-        ''', amount)
+@app.put("/budget-approvals/{approval_id}", response_model=BudgetApproval)
+def update_budget_approval(approval_id: int, approval: BudgetApprovalUpdate):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
         
-        # Record transaction
-        await conn.execute('''
-            INSERT INTO savings_transactions (amount, type, date, description)
-            VALUES ($1, $2, $3, $4)
-        ''', transaction.amount, transaction.type, transaction.date, transaction.description)
+        # Get current approval
+        cursor.execute('''
+            SELECT id, activity_id, requested_amount, status 
+            FROM budget_approvals 
+            WHERE id = %s
+        ''', (approval_id,))
         
-        return {"message": "Transaction recorded successfully"}
-
-# Abstinence Tracker Endpoints
-@app.get("/abstinence/tracker/", response_model=AbstinenceTracker)
-async def get_abstinence_tracker():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM abstinence_tracker LIMIT 1")
-        if not row:
-            raise HTTPException(status_code=404, detail="Abstinence tracker not found")
-        return dict(row)
-
-@app.get("/abstinence/progress/", response_model=AbstinenceProgress)
-async def get_abstinence_progress():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        tracker = await conn.fetchrow("SELECT * FROM abstinence_tracker LIMIT 1")
-        if not tracker:
-            raise HTTPException(status_code=404, detail="Abstinence tracker not found")
+        current_approval = cursor.fetchone()
+        if not current_approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+            
+        _, activity_id, requested_amount, current_status = current_approval
         
-        total_days = (tracker['end_date'] - tracker['start_date']).days
-        days_completed = tracker['total_days']
-        days_remaining = max(0, (tracker['end_date'] - date.today()).days)
+        # Only allow updates if currently pending
+        if current_status != 'pending':
+            raise HTTPException(status_code=400, detail="Approval request has already been processed")
+            
+        # Update approval
+        cursor.execute('''
+            UPDATE budget_approvals
+            SET status = %s, approved_by = %s, comments = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            RETURNING id, activity_id, activity_name, requested_amount, status, 
+                      requested_by, approved_by, comments, created_at, updated_at
+        ''', (
+            approval.status,
+            approval.approved_by,
+            approval.comments,
+            approval_id
+        ))
         
-        total_success = await conn.fetchval('''
-            SELECT COUNT(*) FROM abstinence_checkins WHERE success = true
-        ''')
+        updated_approval = cursor.fetchone()
         
-        success_rate = (total_success / days_completed * 100) if days_completed > 0 else 0
+        # If approved, deduct from program budget
+        if approval.status == 'approved':
+            # Get the project's program area
+            cursor.execute('''
+                SELECT p.funding_source, a.budget
+                FROM projects p
+                JOIN activities a ON a.project_id = p.id
+                WHERE a.id = %s
+            ''', (activity_id,))
+            
+            project_info = cursor.fetchone()
+            if not project_info:
+                raise HTTPException(status_code=404, detail="Project not found for activity")
+                
+            program_area, activity_budget = project_info
+            
+            # Verify sufficient funds
+            cursor.execute('''
+                SELECT balance FROM program_areas WHERE name = %s
+            ''', (program_area,))
+            
+            balance = cursor.fetchone()[0]
+            if balance < requested_amount:
+                conn.rollback()
+                raise HTTPException(status_code=400, detail="Insufficient funds in program area")
+                
+            # Deduct from program area
+            cursor.execute('''
+                UPDATE program_areas
+                SET balance = balance - %s
+                WHERE name = %s
+            ''', (requested_amount, program_area))
+            
+            # Also deduct from main account
+            cursor.execute('''
+                UPDATE bank_accounts
+                SET balance = balance - %s
+                WHERE name = 'Main Account'
+            ''', (requested_amount,))
+            
+        conn.commit()
         
         return {
-            "days_completed": days_completed,
-            "total_days_planned": total_days,
-            "days_remaining": days_remaining,
-            "success_rate": round(success_rate, 2)
+            "id": updated_approval[0],
+            "activity_id": updated_approval[1],
+            "activity_name": updated_approval[2],
+            "requested_amount": updated_approval[3],
+            "status": updated_approval[4],
+            "requested_by": updated_approval[5],
+            "approved_by": updated_approval[6],
+            "comments": updated_approval[7],
+            "created_at": updated_approval[8],
+            "updated_at": updated_approval[9]
         }
+    except Exception as e:
+        logger.error(f"Error updating budget approval: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
 
-@app.get("/abstinence/checkins/", response_model=List[dict])
-async def get_abstinence_checkins():
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM abstinence_checkins ORDER BY date DESC")
-        return [dict(row) for row in rows]
-
-@app.post("/abstinence/checkin/")
-async def create_abstinence_checkin(checkin: AbstinenceCheckIn):
-    pool = await get_db()
-    async with pool.acquire() as conn:
-        # Check if check-in already exists for this date
-        existing = await conn.fetchrow("SELECT * FROM abstinence_checkins WHERE date = $1", checkin.date)
-        if existing:
-            raise HTTPException(status_code=400, detail="Check-in already exists for this date")
+@app.get("/budget-approvals/", response_model=List[BudgetApproval])
+def get_budget_approvals(status: Optional[str] = None):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
         
-        # Record check-in
-        await conn.execute('''
-            INSERT INTO abstinence_checkins (date, success, notes)
-            VALUES ($1, $2, $3)
-        ''', checkin.date, checkin.success, checkin.notes)
+        query = '''
+            SELECT id, activity_id, activity_name, requested_amount, status, 
+                   requested_by, approved_by, comments, created_at, updated_at
+            FROM budget_approvals
+        '''
         
-        # Update tracker stats
-        tracker = await conn.fetchrow("SELECT * FROM abstinence_tracker LIMIT 1")
-        if not tracker:
-            raise HTTPException(status_code=404, detail="Abstinence tracker not found")
-        
-        current_streak = 0
-        longest_streak = tracker['longest_streak']
-        
-        if checkin.success:
-            # Get previous day's check-in to determine streak
-            prev_date = checkin.date - timedelta(days=1)
-            prev_checkin = await conn.fetchrow("SELECT * FROM abstinence_checkins WHERE date = $1", prev_date)
+        params = []
+        if status:
+            query += ' WHERE status = %s'
+            params.append(status)
             
-            if prev_checkin and prev_checkin['success']:
-                current_streak = tracker['current_streak'] + 1
-            else:
-                current_streak = 1
+        query += ' ORDER BY created_at DESC'
+        
+        cursor.execute(query, params)
+        
+        approvals = []
+        for row in cursor.fetchall():
+            approvals.append({
+                "id": row[0],
+                "activity_id": row[1],
+                "activity_name": row[2],
+                "requested_amount": row[3],
+                "status": row[4],
+                "requested_by": row[5],
+                "approved_by": row[6],
+                "comments": row[7],
+                "created_at": row[8],
+                "updated_at": row[9]
+            })
             
-            longest_streak = max(longest_streak, current_streak)
-        else:
-            current_streak = 0
-        
-        await conn.execute('''
-            UPDATE abstinence_tracker 
-            SET 
-                current_streak = $1,
-                longest_streak = $2,
-                total_days = total_days + 1
-        ''', current_streak, longest_streak)
-        
-        return {"message": "Check-in recorded successfully"}
+        return approvals
+    except Exception as e:
+        logger.error(f"Error fetching budget approvals: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch approvals")
+    finally:
+        if conn:
+            conn.close()
+            
+# Run the application
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
