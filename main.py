@@ -266,10 +266,11 @@ class Report(ReportCreate):
 
 class BudgetItemCreate(BaseModel):
     item_name: str 
-    description: Optional[str] = str
+    description: Optional[str] = None  # Changed from str to None as default
     quantity: float
     unit_price: float 
     category: str 
+    project_id: Optional[int] = None  # Make this optional
     
 class ProgramArea(BaseModel):
     id: int
@@ -3225,6 +3226,102 @@ def get_activity_approvals(status: Optional[str] = None):
     except Exception as e:
         logger.error(f"Error fetching activity approvals: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch activity approvals")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/activities/{activity_id}/budget-items/", response_model=List[BudgetItem])
+def get_activity_budget_items(activity_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verify activity exists
+        cursor.execute('SELECT id FROM activities WHERE id = %s', (activity_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Activity not found")
+            
+        cursor.execute('''
+            SELECT id, project_id, activity_id, item_name, description, 
+                   quantity, unit_price, total, category, created_at
+            FROM budget_items
+            WHERE activity_id = %s
+            ORDER BY created_at DESC
+        ''', (activity_id,))
+        
+        items = []
+        for row in cursor.fetchall():
+            items.append({
+                "id": row[0],
+                "project_id": row[1],
+                "activity_id": row[2],
+                "item_name": row[3],
+                "description": row[4],
+                "quantity": row[5],
+                "unit_price": row[6],
+                "total": row[7],
+                "category": row[8],
+                "created_at": row[9].strftime("%Y-%m-%d %H:%M:%S")
+            })
+            
+        return items
+    except Exception as e:
+        logger.error(f"Error fetching activity budget items: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch activity budget items")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/activities/{activity_id}/budget-items/", response_model=BudgetItem)
+def create_activity_budget_item(activity_id: int, budget_item: BudgetItemCreate):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verify activity exists and get its project_id
+        cursor.execute('SELECT project_id FROM activities WHERE id = %s', (activity_id,))
+        activity = cursor.fetchone()
+        if not activity:
+            raise HTTPException(status_code=404, detail="Activity not found")
+            
+        project_id = activity[0]
+            
+        cursor.execute('''
+            INSERT INTO budget_items (project_id, activity_id, item_name, description, quantity, unit_price, category)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, project_id, activity_id, item_name, description, quantity, unit_price, total, category, created_at
+        ''', (
+            project_id,
+            activity_id,
+            budget_item.item_name,
+            budget_item.description,
+            budget_item.quantity,
+            budget_item.unit_price,
+            budget_item.category
+        ))
+        
+        new_item = cursor.fetchone()
+        conn.commit()
+        
+        return {
+            "id": new_item[0],
+            "project_id": new_item[1],
+            "activity_id": new_item[2],
+            "item_name": new_item[3],
+            "description": new_item[4],
+            "quantity": new_item[5],
+            "unit_price": new_item[6],
+            "total": new_item[7],
+            "category": new_item[8],
+            "created_at": new_item[9]
+        }
+    except Exception as e:
+        logger.error(f"Error creating activity budget item: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
             conn.close()
