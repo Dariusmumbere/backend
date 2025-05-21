@@ -1775,6 +1775,9 @@ def create_activity(activity: ActivityCreate):
             
         project_name = project[0]
         
+        # Insert the activity with status "pending" if not specified
+        status = activity.status if activity.status else "pending"
+        
         cursor.execute('''
             INSERT INTO activities (name, project_id, description, start_date, end_date, budget, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -1786,10 +1789,24 @@ def create_activity(activity: ActivityCreate):
             activity.start_date,
             activity.end_date,
             activity.budget,
-            activity.status
+            status
         ))
         
         new_activity = cursor.fetchone()
+        
+        # Create an approval request if status is pending
+        if status == "pending":
+            cursor.execute('''
+                INSERT INTO activity_approvals 
+                (activity_id, activity_name, requested_by, requested_amount, status)
+                VALUES (%s, %s, %s, %s, 'pending')
+            ''', (
+                new_activity[0],  # activity_id
+                new_activity[1],  # activity_name
+                "system",         # requested_by (could be changed to actual user)
+                new_activity[6],  # budget amount
+            ))
+        
         conn.commit()
         
         return {
@@ -1812,7 +1829,6 @@ def create_activity(activity: ActivityCreate):
     finally:
         if conn:
             conn.close()
-
 @app.get("/activities/", response_model=List[Activity])
 def get_activities():
     conn = None
@@ -3319,6 +3335,58 @@ def create_activity_budget_item(activity_id: int, budget_item: BudgetItemCreate)
         }
     except Exception as e:
         logger.error(f"Error creating activity budget item: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/activities/{activity_id}/request-approval")
+def request_activity_approval(activity_id: int, requested_by: str = "system"):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get activity details
+        cursor.execute('''
+            SELECT a.id, a.name, a.budget 
+            FROM activities a
+            WHERE a.id = %s
+        ''', (activity_id,))
+        activity = cursor.fetchone()
+        
+        if not activity:
+            raise HTTPException(status_code=404, detail="Activity not found")
+            
+        # Create approval request
+        cursor.execute('''
+            INSERT INTO activity_approvals 
+            (activity_id, activity_name, requested_by, requested_amount, status)
+            VALUES (%s, %s, %s, %s, 'pending')
+            ON CONFLICT (activity_id) DO UPDATE
+            SET status = 'pending',
+                requested_at = CURRENT_TIMESTAMP
+            RETURNING id
+        ''', (
+            activity[0],  # activity_id
+            activity[1],  # activity_name
+            requested_by,
+            activity[2]   # budget amount
+        ))
+        
+        # Update activity status
+        cursor.execute('''
+            UPDATE activities
+            SET status = 'pending'
+            WHERE id = %s
+        ''', (activity_id,))
+        
+        conn.commit()
+        return {"message": "Approval requested successfully"}
+    except Exception as e:
+        logger.error(f"Error requesting approval: {e}")
         if conn:
             conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
