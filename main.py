@@ -366,6 +366,16 @@ def migrate_database():
                 response_comments TEXT
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                type TEXT NOT NULL,
+                amount FLOAT NOT NULL,
+                description TEXT,
+                date DATE NOT NULL DEFAULT CURRENT_DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         # Add status column to activities if it doesn't exist
         cursor.execute("""
