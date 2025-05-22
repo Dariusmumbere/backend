@@ -283,7 +283,6 @@ class BankAccount(BaseModel):
     name: str
     account_number: str
     balance: float
-    
 class ActivityApprovalRequest(BaseModel):
     activity_id: int
     requested_by: str
@@ -301,17 +300,43 @@ class ActivityApproval(BaseModel):
     created_at: datetime
     approved_at: Optional[datetime]
     approved_by: Optional[str]
-    response_comments: Optional[str]  
+    response_comments: Optional[str] 
     budget_items: List[BudgetItem] = []
-    
-class ActivityApprovalUpdate(BaseModel):
-    decision: str
-    approved_by: str
-    response_comments: Optional[str] = None    
+
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
+def migrate_database():
+    """Handle database schema migrations"""
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if donor_name column exists in donations table
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='donations' AND column_name='donor_name'
+        """)
+        if not cursor.fetchone():
+            # Add the donor_name column if it doesn't exist
+            cursor.execute("""
+                ALTER TABLE donations 
+                ADD COLUMN donor_name TEXT
+            """)
+            logger.info("Added donor_name column to donations table")
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error migrating database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def migrate_database():
     """Handle database schema migrations"""
@@ -337,31 +362,6 @@ def migrate_database():
             )
         ''')
         
-        # Create transactions table with description column if it doesn't exist
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id SERIAL PRIMARY KEY,
-                type TEXT NOT NULL,  -- 'deposit' or 'expense'
-                amount FLOAT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',  -- Changed to NOT NULL with default
-                date DATE NOT NULL DEFAULT CURRENT_DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Add description column if it doesn't exist
-        cursor.execute("""
-            DO $$
-            BEGIN
-                BEGIN
-                    ALTER TABLE transactions ADD COLUMN description TEXT NOT NULL DEFAULT '';
-                EXCEPTION
-                    WHEN duplicate_column THEN 
-                    RAISE NOTICE 'column description already exists in transactions';
-                END;
-            END $$;
-        """)
-        
         # Add status column to activities if it doesn't exist
         cursor.execute("""
             DO $$
@@ -384,7 +384,8 @@ def migrate_database():
     finally:
         if conn:
             conn.close()
-            
+
+
 # Initialize database tables
 def init_db():
     conn = None
@@ -560,16 +561,6 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'submitted',
                 submitted_by INTEGER REFERENCES employees(id),
                 approved_by INTEGER REFERENCES employees(id),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id SERIAL PRIMARY KEY,
-                type TEXT NOT NULL,  -- 'deposit' or 'expense'
-                amount FLOAT NOT NULL,
-                description TEXT,
-                date DATE NOT NULL DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -3155,8 +3146,8 @@ def create_activity_approval(approval: ActivityApprovalRequest):
             conn.close()
 
 @app.put("/activity-approvals/{approval_id}", response_model=ActivityApproval)
-def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpdate):
-    if update_data.decision not in ["approved", "rejected"]:
+def update_activity_approval(approval_id: int, decision: str, approved_by: str, response_comments: Optional[str] = None):
+    if decision not in ["approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Decision must be either 'approved' or 'rejected'")
     
     conn = None
@@ -3164,19 +3155,6 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         conn = get_db()
         cursor = conn.cursor()
         
-        # First get the approval details including the activity and requested amount
-        cursor.execute('''
-            SELECT activity_id, activity_name, requested_amount 
-            FROM activity_approvals 
-            WHERE id = %s
-        ''', (approval_id,))
-        approval = cursor.fetchone()
-        if not approval:
-            raise HTTPException(status_code=404, detail="Approval request not found")
-            
-        activity_id, activity_name, requested_amount = approval
-        
-        # Update the approval status
         cursor.execute('''
             UPDATE activity_approvals
             SET status = %s,
@@ -3186,70 +3164,20 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             WHERE id = %s
             RETURNING id, activity_id, activity_name, requested_by, requested_amount, 
                       comments, status, created_at, approved_at, approved_by, response_comments
-        ''', (
-            update_data.decision, 
-            update_data.approved_by, 
-            update_data.response_comments, 
-            approval_id
-        ))
+        ''', (decision, approved_by, response_comments, approval_id))
         
         updated_approval = cursor.fetchone()
-        
-        # If approved, update the activity status and perform deductions
-        if update_data.decision == "approved":
-            # Update the activity status
+        if not updated_approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+            
+        # If approved, update the activity status
+        if decision == "approved":
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
                 WHERE id = %s
-            ''', (activity_id,))
+            ''', (updated_approval[1],))
             
-            # Get the project and program area for this activity
-            cursor.execute('''
-                SELECT p.funding_source, a.budget
-                FROM activities a
-                JOIN projects p ON a.project_id = p.id
-                WHERE a.id = %s
-            ''', (activity_id,))
-            project_info = cursor.fetchone()
-            
-            if project_info:
-                funding_source, budget = project_info
-                
-                # If funding source is one of our program areas, deduct from that program
-                if funding_source in ["Women Empowerment", "Vocational Education", "Climate Change", "Reproductive Health"]:
-                    # Deduct from program area
-                    cursor.execute('''
-                        UPDATE program_areas
-                        SET balance = balance - %s
-                        WHERE name = %s
-                        RETURNING balance
-                    ''', (budget, funding_source))
-                    
-                    if not cursor.fetchone():
-                        logger.warning(f"Failed to update program area {funding_source}")
-                
-                # Always deduct from main account
-                cursor.execute('''
-                    UPDATE bank_accounts
-                    SET balance = balance - %s
-                    WHERE name = 'Main Account'
-                    RETURNING balance
-                ''', (budget,))
-                
-                if not cursor.fetchone():
-                    logger.error("Failed to update main account")
-                
-                # Record the transaction with a proper description
-                cursor.execute('''
-                    INSERT INTO transactions (type, amount, description, date)
-                    VALUES (%s, %s, %s, CURRENT_DATE)
-                ''', (
-                    'expense',
-                    budget,
-                    f"Budget allocation for activity: {activity_name} (Project: {funding_source})"  # Added proper description
-                ))
-        
         conn.commit()
         
         return {
@@ -3273,7 +3201,7 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
     finally:
         if conn:
             conn.close()
-            
+
 @app.get("/activity-approvals/", response_model=List[ActivityApproval])
 def get_activity_approvals(status: Optional[str] = None):
     conn = None
@@ -3333,7 +3261,7 @@ def get_activity_approvals(status: Optional[str] = None):
                 "approved_at": row[8],
                 "approved_by": row[9],
                 "response_comments": row[10],
-                "budget_items": budget_items  
+                "budget_items": budget_items  # Add budget items to the response
             })
             
         return approvals
@@ -3343,6 +3271,7 @@ def get_activity_approvals(status: Optional[str] = None):
     finally:
         if conn:
             conn.close()
+
 @app.get("/activities/{activity_id}/budget-items/", response_model=List[BudgetItem])
 def get_activity_budget_items(activity_id: int):
     conn = None
