@@ -3196,22 +3196,18 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             
         approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
         
-        # Map funding source to program area if needed
-        program_area_map = {
-            "General Funds": "Main Account",
-            "Women Empowerment": "Women Empowerment",
-            "Vocational Education": "Vocational Education",
-            "Climate Change": "Climate Change",
-            "Reproductive Health": "Reproductive Health"
-        }
+        # Validate the funding_source matches one of our program areas
+        valid_program_areas = [
+            "Women Empowerment", 
+            "Vocational Education", 
+            "Climate Change", 
+            "Reproductive Health"
+        ]
         
-        program_area = program_area_map.get(funding_source)
-        if not program_area:
+        if funding_source not in valid_program_areas:
             raise HTTPException(
                 status_code=400,
-                detail=f"Project funding source '{funding_source}' doesn't match any program area. "
-                      f"Valid program areas are: Women Empowerment, Vocational Education, "
-                      f"Climate Change, Reproductive Health"
+                detail=f"Invalid funding source '{funding_source}'. Must be one of: {', '.join(valid_program_areas)}"
             )
         
         # Update the approval status
@@ -3233,7 +3229,7 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         
         updated_approval = cursor.fetchone()
         
-        # If approved, update the activity status and deduct from program area and main account
+        # If approved, update the activity status and deduct from program area
         if update_data.decision == "approved":
             # Update activity status
             cursor.execute('''
@@ -3242,49 +3238,19 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
                 WHERE id = %s
             ''', (activity_id,))
             
-            try:
-                # 1. Deduct from the program area first
-                cursor.execute('''
-                    UPDATE program_areas
-                    SET balance = balance - %s
-                    WHERE name = %s
-                    RETURNING balance
-                ''', (requested_amount, program_area))
-                
-                if not cursor.fetchone():
-                    raise HTTPException(
-                        status_code=400, 
-                        detail=f"Program area '{program_area}' not found or insufficient funds"
-                    )
-                
-                # 2. Also deduct from the main account
-                cursor.execute('''
-                    UPDATE bank_accounts
-                    SET balance = balance - %s
-                    WHERE name = 'Main Account'
-                    RETURNING balance
-                ''', (requested_amount,))
-                
-                if not cursor.fetchone():
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Main account not found or insufficient funds"
-                    )
-                
-                # Log the transaction
-                cursor.execute('''
-                    INSERT INTO transactions (type, amount, description, date)
-                    VALUES ('expense', %s, %s, CURRENT_DATE)
-                ''', (
-                    requested_amount,
-                    f"Budget allocation for activity: {activity_name} ({program_area})"
-                ))
-                
-            except Exception as e:
-                logger.error(f"Error updating balances: {e}")
+            # Deduct the requested amount from the program area (funding_source)
+            cursor.execute('''
+                UPDATE program_areas
+                SET balance = balance - %s
+                WHERE name = %s
+                RETURNING balance
+            ''', (requested_amount, funding_source))
+            
+            # Verify the program area was updated
+            if not cursor.fetchone():
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to update balances: {str(e)}"
+                    status_code=400, 
+                    detail=f"Program area '{funding_source}' not found or insufficient funds"
                 )
             
             # Also update the project's remaining budget
@@ -3300,25 +3266,6 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
                 
         conn.commit()
         
-        # Get budget items for the response
-        cursor.execute('''
-            SELECT id, item_name, description, quantity, unit_price, total, category
-            FROM budget_items
-            WHERE activity_id = %s
-        ''', (activity_id,))
-        
-        budget_items = []
-        for row in cursor.fetchall():
-            budget_items.append({
-                "id": row[0],
-                "item_name": row[1],
-                "description": row[2],
-                "quantity": row[3],
-                "unit_price": row[4],
-                "total": row[5],
-                "category": row[6]
-            })
-        
         return {
             "id": updated_approval[0],
             "activity_id": updated_approval[1],
@@ -3330,8 +3277,7 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             "created_at": updated_approval[7],
             "approved_at": updated_approval[8],
             "approved_by": updated_approval[9],
-            "response_comments": updated_approval[10],
-            "budget_items": budget_items
+            "response_comments": updated_approval[10]
         }
     except Exception as e:
         logger.error(f"Error updating activity approval: {e}")
