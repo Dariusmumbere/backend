@@ -3209,28 +3209,6 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             raise HTTPException(status_code=404, detail="Approval request not found")
             
         approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
-
-        cursor.execute('''
-            INSERT INTO transactions (type, amount, description)
-            VALUES ('expense', %s, %s)
-        ''', (
-            requested_amount,
-            f"Activity funding: {activity_name} (Project: {project_name})"
-        ))
-        
-        # Validate the funding_source matches one of our program areas
-        valid_program_areas = [
-            "Women Empowerment", 
-            "Vocational Education", 
-            "Climate Change", 
-            "Reproductive Health"
-        ]
-        
-        if funding_source not in valid_program_areas:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid funding source '{funding_source}'. Must be one of: {', '.join(valid_program_areas)}"
-            )
         
         # Update the approval status
         cursor.execute('''
@@ -3270,6 +3248,7 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             
             # Verify the program area was updated
             if not cursor.fetchone():
+                logger.error(f"Failed to update program area {funding_source}")
                 raise HTTPException(
                     status_code=400, 
                     detail=f"Program area '{funding_source}' not found or insufficient funds"
