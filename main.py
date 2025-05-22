@@ -3185,8 +3185,8 @@ def create_activity_approval(approval: ActivityApprovalRequest):
             conn.close()
 
 @app.put("/activity-approvals/{approval_id}", response_model=ActivityApproval)
-def update_activity_approval(approval_id: int, decision: str, approved_by: str, response_comments: Optional[str] = None):
-    if decision not in ["approved", "rejected"]:
+def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpdate):
+    if update_data.decision not in ["approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Decision must be either 'approved' or 'rejected'")
     
     conn = None
@@ -3203,14 +3203,19 @@ def update_activity_approval(approval_id: int, decision: str, approved_by: str, 
             WHERE id = %s
             RETURNING id, activity_id, activity_name, requested_by, requested_amount, 
                       comments, status, created_at, approved_at, approved_by, response_comments
-        ''', (decision, approved_by, response_comments, approval_id))
+        ''', (
+            update_data.decision, 
+            update_data.approved_by, 
+            update_data.response_comments, 
+            approval_id
+        ))
         
         updated_approval = cursor.fetchone()
         if not updated_approval:
             raise HTTPException(status_code=404, detail="Approval request not found")
             
         # If approved, update the activity status
-        if decision == "approved":
+        if update_data.decision == "approved":
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
