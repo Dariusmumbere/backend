@@ -3194,6 +3194,19 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         conn = get_db()
         cursor = conn.cursor()
         
+        # First get the approval details including the activity and requested amount
+        cursor.execute('''
+            SELECT activity_id, activity_name, requested_amount 
+            FROM activity_approvals 
+            WHERE id = %s
+        ''', (approval_id,))
+        approval = cursor.fetchone()
+        if not approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+            
+        activity_id, activity_name, requested_amount = approval
+        
+        # Update the approval status
         cursor.execute('''
             UPDATE activity_approvals
             SET status = %s,
@@ -3211,17 +3224,62 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         ))
         
         updated_approval = cursor.fetchone()
-        if not updated_approval:
-            raise HTTPException(status_code=404, detail="Approval request not found")
-            
-        # If approved, update the activity status
+        
+        # If approved, update the activity status and perform deductions
         if update_data.decision == "approved":
+            # Update the activity status
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
                 WHERE id = %s
-            ''', (updated_approval[1],))
+            ''', (activity_id,))
             
+            # Get the project and program area for this activity
+            cursor.execute('''
+                SELECT p.funding_source, a.budget
+                FROM activities a
+                JOIN projects p ON a.project_id = p.id
+                WHERE a.id = %s
+            ''', (activity_id,))
+            project_info = cursor.fetchone()
+            
+            if project_info:
+                funding_source, budget = project_info
+                
+                # If funding source is one of our program areas, deduct from that program
+                if funding_source in ["Women Empowerment", "Vocational Education", "Climate Change", "Reproductive Health"]:
+                    # Deduct from program area
+                    cursor.execute('''
+                        UPDATE program_areas
+                        SET balance = balance - %s
+                        WHERE name = %s
+                        RETURNING balance
+                    ''', (budget, funding_source))
+                    
+                    if not cursor.fetchone():
+                        logger.warning(f"Failed to update program area {funding_source}")
+                
+                # Always deduct from main account
+                cursor.execute('''
+                    UPDATE bank_accounts
+                    SET balance = balance - %s
+                    WHERE name = 'Main Account'
+                    RETURNING balance
+                ''', (budget,))
+                
+                if not cursor.fetchone():
+                    logger.error("Failed to update main account")
+                
+                # Record the transaction
+                cursor.execute('''
+                    INSERT INTO transactions (type, amount, description, date)
+                    VALUES (%s, %s, %s, CURRENT_DATE)
+                ''', (
+                    'expense',
+                    budget,
+                    f"Budget allocation for activity: {activity_name}"
+                ))
+        
         conn.commit()
         
         return {
