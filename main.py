@@ -3270,14 +3270,14 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
                 if not cursor.fetchone():
                     logger.error("Failed to update main account")
                 
-                # Record the transaction
+                # Record the transaction with a proper description
                 cursor.execute('''
                     INSERT INTO transactions (type, amount, description, date)
                     VALUES (%s, %s, %s, CURRENT_DATE)
                 ''', (
                     'expense',
                     budget,
-                    f"Budget allocation for activity: {activity_name}"
+                    f"Budget allocation for activity: {activity_name} (Project: {funding_source})"  # Added proper description
                 ))
         
         conn.commit()
