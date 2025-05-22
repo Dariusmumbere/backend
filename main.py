@@ -312,36 +312,6 @@ class ActivityApprovalUpdate(BaseModel):
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-def migrate_database():
-    """Handle database schema migrations"""
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        # Check if donor_name column exists in donations table
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='donations' AND column_name='donor_name'
-        """)
-        if not cursor.fetchone():
-            # Add the donor_name column if it doesn't exist
-            cursor.execute("""
-                ALTER TABLE donations 
-                ADD COLUMN donor_name TEXT
-            """)
-            logger.info("Added donor_name column to donations table")
-        
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Error migrating database: {e}")
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
 
 def migrate_database():
     """Handle database schema migrations"""
