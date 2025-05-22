@@ -373,7 +373,7 @@ def migrate_database():
                 id SERIAL PRIMARY KEY,
                 type TEXT NOT NULL,  -- 'deposit' or 'expense'
                 amount FLOAT NOT NULL,
-                description TEXT,
+                description TEXT NOT NULL DEFAULT '',  -- Changed to NOT NULL with default
                 date DATE NOT NULL DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -384,7 +384,7 @@ def migrate_database():
             DO $$
             BEGIN
                 BEGIN
-                    ALTER TABLE transactions ADD COLUMN description TEXT;
+                    ALTER TABLE transactions ADD COLUMN description TEXT NOT NULL DEFAULT '';
                 EXCEPTION
                     WHEN duplicate_column THEN 
                     RAISE NOTICE 'column description already exists in transactions';
@@ -414,7 +414,7 @@ def migrate_database():
     finally:
         if conn:
             conn.close()
-
+            
 # Initialize database tables
 def init_db():
     conn = None
