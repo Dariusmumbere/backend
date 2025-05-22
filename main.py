@@ -301,6 +301,8 @@ class ActivityApproval(BaseModel):
     approved_at: Optional[datetime]
     approved_by: Optional[str]
     response_comments: Optional[str]  
+    budget_items: List[BudgetItem] = []
+    
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -3224,6 +3226,29 @@ def get_activity_approvals(status: Optional[str] = None):
         
         approvals = []
         for row in cursor.fetchall():
+            # Get budget items for this activity
+            cursor.execute('''
+                SELECT id, project_id, activity_id, item_name, description, 
+                       quantity, unit_price, total, category, created_at
+                FROM budget_items
+                WHERE activity_id = %s
+            ''', (row[1],))  # row[1] is activity_id
+            
+            budget_items = []
+            for item in cursor.fetchall():
+                budget_items.append({
+                    "id": item[0],
+                    "project_id": item[1],
+                    "activity_id": item[2],
+                    "item_name": item[3],
+                    "description": item[4],
+                    "quantity": item[5],
+                    "unit_price": item[6],
+                    "total": item[7],
+                    "category": item[8],
+                    "created_at": item[9]
+                })
+            
             approvals.append({
                 "id": row[0],
                 "activity_id": row[1],
@@ -3235,7 +3260,8 @@ def get_activity_approvals(status: Optional[str] = None):
                 "created_at": row[7],
                 "approved_at": row[8],
                 "approved_by": row[9],
-                "response_comments": row[10]
+                "response_comments": row[10],
+                "budget_items": budget_items  
             })
             
         return approvals
@@ -3245,7 +3271,6 @@ def get_activity_approvals(status: Optional[str] = None):
     finally:
         if conn:
             conn.close()
-
 @app.get("/activities/{activity_id}/budget-items/", response_model=List[BudgetItem])
 def get_activity_budget_items(activity_id: int):
     conn = None
