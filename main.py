@@ -3176,6 +3176,13 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             
         approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
         
+        # Map funding source to program area if needed
+        program_area_map = {
+            "General Funds": "Main Account",
+            # Add other mappings if needed
+        }
+        program_area = program_area_map.get(funding_source, funding_source)
+        
         # Update the approval status
         cursor.execute('''
             UPDATE activity_approvals
@@ -3204,20 +3211,27 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
                 WHERE id = %s
             ''', (activity_id,))
             
-            # Deduct the requested amount from the program area (funding_source)
-            cursor.execute('''
-                UPDATE program_areas
-                SET balance = balance - %s
-                WHERE name = %s
-                RETURNING balance
-            ''', (requested_amount, funding_source))
-            
-            # Verify the program area was updated
-            if not cursor.fetchone():
-                logger.error(f"Failed to update program area {funding_source}")
+            try:
+                # Deduct the requested amount from the program area
+                cursor.execute('''
+                    UPDATE program_areas
+                    SET balance = balance - %s
+                    WHERE name = %s
+                    RETURNING balance
+                ''', (requested_amount, program_area))
+                
+                # Verify the program area was updated
+                if not cursor.fetchone():
+                    logger.error(f"Failed to update program area {program_area}")
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Program area '{program_area}' not found or insufficient funds. Valid areas are: Women Empowerment, Vocational Education, Climate Change, Reproductive Health"
+                    )
+            except Exception as e:
+                logger.error(f"Error updating program area: {e}")
                 raise HTTPException(
-                    status_code=400, 
-                    detail=f"Program area '{funding_source}' not found or insufficient funds"
+                    status_code=400,
+                    detail=f"Failed to update program area. Please ensure the project's funding source matches one of the existing program areas."
                 )
             
             # Also update the project's remaining budget
