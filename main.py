@@ -3185,8 +3185,8 @@ def create_activity_approval(approval: ActivityApprovalRequest):
             conn.close()
 
 @app.put("/activity-approvals/{approval_id}", response_model=ActivityApproval)
-def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpdate):
-    if update_data.decision not in ["approved", "rejected"]:
+def update_activity_approval(approval_id: int, decision: str, approved_by: str, response_comments: Optional[str] = None):
+    if decision not in ["approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Decision must be either 'approved' or 'rejected'")
     
     conn = None
@@ -3194,23 +3194,6 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         conn = get_db()
         cursor = conn.cursor()
         
-        # First get the approval details including the activity and requested amount
-        cursor.execute('''
-            SELECT aa.id, aa.activity_id, aa.activity_name, aa.requested_amount, 
-                   a.project_id, p.name as project_name, p.funding_source
-            FROM activity_approvals aa
-            JOIN activities a ON aa.activity_id = a.id
-            JOIN projects p ON a.project_id = p.id
-            WHERE aa.id = %s
-        ''', (approval_id,))
-        
-        approval = cursor.fetchone()
-        if not approval:
-            raise HTTPException(status_code=404, detail="Approval request not found")
-            
-        approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
-        
-        # Update the approval status
         cursor.execute('''
             UPDATE activity_approvals
             SET status = %s,
@@ -3220,51 +3203,20 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             WHERE id = %s
             RETURNING id, activity_id, activity_name, requested_by, requested_amount, 
                       comments, status, created_at, approved_at, approved_by, response_comments
-        ''', (
-            update_data.decision, 
-            update_data.approved_by, 
-            update_data.response_comments, 
-            approval_id
-        ))
+        ''', (decision, approved_by, response_comments, approval_id))
         
         updated_approval = cursor.fetchone()
-        
-        # If approved, update the activity status and deduct from program area
-        if update_data.decision == "approved":
-            # Update activity status
+        if not updated_approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+            
+        # If approved, update the activity status
+        if decision == "approved":
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
                 WHERE id = %s
-            ''', (activity_id,))
+            ''', (updated_approval[1],))
             
-            # Deduct the requested amount from the program area (funding_source)
-            cursor.execute('''
-                UPDATE program_areas
-                SET balance = balance - %s
-                WHERE name = %s
-                RETURNING balance
-            ''', (requested_amount, funding_source))
-            
-            # Verify the program area was updated
-            if not cursor.fetchone():
-                logger.error(f"Failed to update program area {funding_source}")
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Program area '{funding_source}' not found or insufficient funds"
-                )
-            
-            # Also update the project's remaining budget
-            cursor.execute('''
-                UPDATE projects
-                SET budget = budget - %s
-                WHERE id = %s
-                RETURNING budget
-            ''', (requested_amount, project_id))
-            
-            if not cursor.fetchone():
-                logger.error(f"Failed to update project {project_id} budget")
-                
         conn.commit()
         
         return {
