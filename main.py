@@ -3160,6 +3160,19 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         conn = get_db()
         cursor = conn.cursor()
         
+        # First get the approval details
+        cursor.execute('''
+            SELECT activity_id, activity_name, requested_amount 
+            FROM activity_approvals 
+            WHERE id = %s
+        ''', (approval_id,))
+        approval = cursor.fetchone()
+        if not approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+            
+        activity_id, activity_name, requested_amount = approval
+        
+        # Update the approval status
         cursor.execute('''
             UPDATE activity_approvals
             SET status = %s,
@@ -3177,16 +3190,49 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         ))
         
         updated_approval = cursor.fetchone()
-        if not updated_approval:
-            raise HTTPException(status_code=404, detail="Approval request not found")
-            
-        # If approved, update the activity status
+        
+        # If approved, update the activity status and deduct from program area
         if update_data.decision == "approved":
+            # Update activity status
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
                 WHERE id = %s
-            ''', (updated_approval[1],))  # updated_approval[1] is activity_id
+            ''', (activity_id,))
+            
+            # Get the project associated with this activity
+            cursor.execute('''
+                SELECT p.name 
+                FROM activities a
+                JOIN projects p ON a.project_id = p.id
+                WHERE a.id = %s
+            ''', (activity_id,))
+            project = cursor.fetchone()
+            
+            if project:
+                program_area = project[0]
+                
+                # Deduct the amount from the program area balance
+                cursor.execute('''
+                    UPDATE program_areas
+                    SET balance = balance - %s
+                    WHERE name = %s
+                    RETURNING balance
+                ''', (requested_amount, program_area))
+                
+                if not cursor.fetchone():
+                    logger.warning(f"Program area {program_area} not found when deducting funds")
+                
+                # Also deduct from main account
+                cursor.execute('''
+                    UPDATE bank_accounts
+                    SET balance = balance - %s
+                    WHERE name = 'Main Account'
+                    RETURNING balance
+                ''', (requested_amount,))
+                
+                if not cursor.fetchone():
+                    logger.error("Main account not found when deducting funds")
             
         conn.commit()
         
