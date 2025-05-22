@@ -569,6 +569,16 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                type TEXT NOT NULL,  -- 'deposit' or 'expense'
+                amount FLOAT NOT NULL,
+                description TEXT,
+                date DATE NOT NULL DEFAULT CURRENT_DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
       
 
         cursor.execute('''
