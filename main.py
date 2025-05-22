@@ -366,16 +366,31 @@ def migrate_database():
                 response_comments TEXT
             )
         ''')
+        
+        # Create transactions table with description column if it doesn't exist
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 id SERIAL PRIMARY KEY,
-                type TEXT NOT NULL,
+                type TEXT NOT NULL,  -- 'deposit' or 'expense'
                 amount FLOAT NOT NULL,
                 description TEXT,
                 date DATE NOT NULL DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Add description column if it doesn't exist
+        cursor.execute("""
+            DO $$
+            BEGIN
+                BEGIN
+                    ALTER TABLE transactions ADD COLUMN description TEXT;
+                EXCEPTION
+                    WHEN duplicate_column THEN 
+                    RAISE NOTICE 'column description already exists in transactions';
+                END;
+            END $$;
+        """)
         
         # Add status column to activities if it doesn't exist
         cursor.execute("""
@@ -399,7 +414,6 @@ def migrate_database():
     finally:
         if conn:
             conn.close()
-
 
 # Initialize database tables
 def init_db():
@@ -3195,6 +3209,14 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             raise HTTPException(status_code=404, detail="Approval request not found")
             
         approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
+
+        cursor.execute('''
+            INSERT INTO transactions (type, amount, description)
+            VALUES ('expense', %s, %s)
+        ''', (
+            requested_amount,
+            f"Activity funding: {activity_name} (Project: {project_name})"
+        ))
         
         # Validate the funding_source matches one of our program areas
         valid_program_areas = [
