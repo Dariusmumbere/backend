@@ -3160,17 +3160,21 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
         conn = get_db()
         cursor = conn.cursor()
         
-        # First get the approval details
+        # First get the approval details including the activity and requested amount
         cursor.execute('''
-            SELECT activity_id, activity_name, requested_amount 
-            FROM activity_approvals 
-            WHERE id = %s
+            SELECT aa.id, aa.activity_id, aa.activity_name, aa.requested_amount, 
+                   a.project_id, p.name as project_name, p.funding_source
+            FROM activity_approvals aa
+            JOIN activities a ON aa.activity_id = a.id
+            JOIN projects p ON a.project_id = p.id
+            WHERE aa.id = %s
         ''', (approval_id,))
+        
         approval = cursor.fetchone()
         if not approval:
             raise HTTPException(status_code=404, detail="Approval request not found")
             
-        activity_id, activity_name, requested_amount = approval
+        approval_id, activity_id, activity_name, requested_amount, project_id, project_name, funding_source = approval
         
         # Update the approval status
         cursor.execute('''
@@ -3200,40 +3204,33 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
                 WHERE id = %s
             ''', (activity_id,))
             
-            # Get the project associated with this activity
+            # Deduct the requested amount from the program area (funding_source)
             cursor.execute('''
-                SELECT p.name 
-                FROM activities a
-                JOIN projects p ON a.project_id = p.id
-                WHERE a.id = %s
-            ''', (activity_id,))
-            project = cursor.fetchone()
+                UPDATE program_areas
+                SET balance = balance - %s
+                WHERE name = %s
+                RETURNING balance
+            ''', (requested_amount, funding_source))
             
-            if project:
-                program_area = project[0]
-                
-                # Deduct the amount from the program area balance
-                cursor.execute('''
-                    UPDATE program_areas
-                    SET balance = balance - %s
-                    WHERE name = %s
-                    RETURNING balance
-                ''', (requested_amount, program_area))
-                
-                if not cursor.fetchone():
-                    logger.warning(f"Program area {program_area} not found when deducting funds")
-                
-                # Also deduct from main account
-                cursor.execute('''
-                    UPDATE bank_accounts
-                    SET balance = balance - %s
-                    WHERE name = 'Main Account'
-                    RETURNING balance
-                ''', (requested_amount,))
-                
-                if not cursor.fetchone():
-                    logger.error("Main account not found when deducting funds")
+            # Verify the program area was updated
+            if not cursor.fetchone():
+                logger.error(f"Failed to update program area {funding_source}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Program area '{funding_source}' not found or insufficient funds"
+                )
             
+            # Also update the project's remaining budget
+            cursor.execute('''
+                UPDATE projects
+                SET budget = budget - %s
+                WHERE id = %s
+                RETURNING budget
+            ''', (requested_amount, project_id))
+            
+            if not cursor.fetchone():
+                logger.error(f"Failed to update project {project_id} budget")
+                
         conn.commit()
         
         return {
