@@ -283,6 +283,7 @@ class BankAccount(BaseModel):
     name: str
     account_number: str
     balance: float
+    
 class ActivityApprovalRequest(BaseModel):
     activity_id: int
     requested_by: str
@@ -303,6 +304,10 @@ class ActivityApproval(BaseModel):
     response_comments: Optional[str]  
     budget_items: List[BudgetItem] = []
     
+class ActivityApprovalUpdate(BaseModel):
+    decision: str
+    approved_by: str
+    response_comments: Optional[str] = None    
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -3146,8 +3151,8 @@ def create_activity_approval(approval: ActivityApprovalRequest):
             conn.close()
 
 @app.put("/activity-approvals/{approval_id}", response_model=ActivityApproval)
-def update_activity_approval(approval_id: int, decision: str, approved_by: str, response_comments: Optional[str] = None):
-    if decision not in ["approved", "rejected"]:
+def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpdate):
+    if update_data.decision not in ["approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Decision must be either 'approved' or 'rejected'")
     
     conn = None
