@@ -3169,19 +3169,24 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
             WHERE id = %s
             RETURNING id, activity_id, activity_name, requested_by, requested_amount, 
                       comments, status, created_at, approved_at, approved_by, response_comments
-        ''', (decision, approved_by, response_comments, approval_id))
+        ''', (
+            update_data.decision, 
+            update_data.approved_by, 
+            update_data.response_comments, 
+            approval_id
+        ))
         
         updated_approval = cursor.fetchone()
         if not updated_approval:
             raise HTTPException(status_code=404, detail="Approval request not found")
             
         # If approved, update the activity status
-        if decision == "approved":
+        if update_data.decision == "approved":
             cursor.execute('''
                 UPDATE activities
                 SET status = 'approved'
                 WHERE id = %s
-            ''', (updated_approval[1],))
+            ''', (updated_approval[1],))  # updated_approval[1] is activity_id
             
         conn.commit()
         
@@ -3206,7 +3211,7 @@ def update_activity_approval(approval_id: int, update_data: ActivityApprovalUpda
     finally:
         if conn:
             conn.close()
-
+            
 @app.get("/activity-approvals/", response_model=List[ActivityApproval])
 def get_activity_approvals(status: Optional[str] = None):
     conn = None
