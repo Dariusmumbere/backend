@@ -4091,7 +4091,71 @@ def get_fintrack_dashboard_summary(user_id: int):
     finally:
         if conn:
             conn.close()
+@app.get("/expenses/", response_model=List[Expense])
+def get_expenses():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, category_id, amount, date, description, payment_method, created_at
+            FROM expenses
+            ORDER BY date DESC
+        ''')
+        
+        expenses = []
+        for row in cursor.fetchall():
+            expenses.append({
+                "id": row[0],
+                "category_id": row[1],
+                "amount": row[2],
+                "date": row[3],
+                "description": row[4],
+                "payment_method": row[5],
+                "created_at": row[6]
+            })
+            
+        return expenses
+    except Exception as e:
+        logger.error(f"Error fetching expenses: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch expenses")
+    finally:
+        if conn:
+            conn.close()
 
+@app.get("/savings/transactions/", response_model=List[SavingsTransaction])
+def get_savings_transactions():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, account_id, amount, date, description, transaction_type, created_at
+            FROM savings_transactions
+            ORDER BY date DESC
+        ''')
+        
+        transactions = []
+        for row in cursor.fetchall():
+            transactions.append({
+                "id": row[0],
+                "account_id": row[1],
+                "amount": row[2],
+                "date": row[3],
+                "description": row[4],
+                "transaction_type": row[5],
+                "created_at": row[6]
+            })
+            
+        return transactions
+    except Exception as e:
+        logger.error(f"Error fetching savings transactions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch savings transactions")
+    finally:
+        if conn:
+            conn.close()
 # Run the application
 if __name__ == "__main__":
     import uvicorn
