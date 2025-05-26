@@ -308,6 +308,66 @@ class ApprovalDecision(BaseModel):
     approved_by: str
     response_comments: Optional[str] = None
 
+class SavingsAccount(BaseModel):
+    id: int
+    name: str
+    balance: float
+    target: Optional[float] = None
+    description: Optional[str] = None
+    created_at: datetime
+
+class SavingsTransaction(BaseModel):
+    id: int
+    account_id: int
+    amount: float
+    date: date
+    description: Optional[str] = None
+    transaction_type: str  # "deposit" or "withdrawal"
+    created_at: datetime
+
+class ExpenseCategory(BaseModel):
+    id: int
+    name: str
+    monthly_budget: float
+    description: Optional[str] = None
+    created_at: datetime
+
+class Expense(BaseModel):
+    id: int
+    category_id: int
+    amount: float
+    date: date
+    description: Optional[str] = None
+    payment_method: str
+    created_at: datetime
+
+class ColdTurkeyChallenge(BaseModel):
+    id: int
+    user_id: int
+    target_category: str
+    target_days: int
+    start_date: date
+    end_date: Optional[date] = None
+    status: str  # "active", "completed", "failed"
+    money_saved: float
+    created_at: datetime
+
+class ColdTurkeyMilestone(BaseModel):
+    id: int
+    challenge_id: int
+    days: int
+    achieved: bool
+    achieved_date: Optional[date] = None
+    created_at: datetime
+
+class UserSettings(BaseModel):
+    user_id: int
+    currency: str
+    savings_goals_notifications: bool
+    expense_alerts: bool
+    dark_mode: bool
+    updated_at: datetime
+
 # File storage setup
 UPLOAD_DIR = "uploads/fundraising"
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -610,6 +670,115 @@ def init_db():
                 balance FLOAT DEFAULT 0
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS savings_accounts (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                balance FLOAT DEFAULT 0,
+                target FLOAT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS savings_transactions (
+                id SERIAL PRIMARY KEY,
+                account_id INTEGER REFERENCES savings_accounts(id) ON DELETE CASCADE,
+                amount FLOAT NOT NULL,
+                date DATE NOT NULL,
+                description TEXT,
+                transaction_type TEXT NOT NULL CHECK (transaction_type IN ('deposit', 'withdrawal')),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS expense_categories (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                monthly_budget FLOAT DEFAULT 0,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS expenses (
+                id SERIAL PRIMARY KEY,
+                category_id INTEGER REFERENCES expense_categories(id) ON DELETE CASCADE,
+                amount FLOAT NOT NULL,
+                date DATE NOT NULL,
+                description TEXT,
+                payment_method TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cold_turkey_challenges (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                target_category TEXT NOT NULL,
+                target_days INTEGER NOT NULL,
+                start_date DATE NOT NULL,
+                end_date DATE,
+                status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'failed')),
+                money_saved FLOAT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cold_turkey_milestones (
+                id SERIAL PRIMARY KEY,
+                challenge_id INTEGER REFERENCES cold_turkey_challenges(id) ON DELETE CASCADE,
+                days INTEGER NOT NULL,
+                achieved BOOLEAN DEFAULT FALSE,
+                achieved_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                currency TEXT DEFAULT 'USD',
+                savings_goals_notifications BOOLEAN DEFAULT TRUE,
+                expense_alerts BOOLEAN DEFAULT TRUE,
+                dark_mode BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        default_categories = [
+            ("Food & Dining", 0),
+            ("Transportation", 0),
+            ("Housing", 0),
+            ("Utilities", 0),
+            ("Entertainment", 0),
+            ("Health & Fitness", 0),
+            ("Shopping", 0),
+            ("Other", 0)
+        ]
+
+        for name, budget in default_categories:
+            cursor.execute('''
+                INSERT INTO expense_categories (name, monthly_budget)
+                VALUES (%s, %s)
+                ON CONFLICT (name) DO NOTHING
+            ''', (name, budget))
+
+        default_accounts = [
+            ("Main Account", 0, None, "Primary savings account"),
+            ("Emergency Fund", 0, 5000, "3 months living expenses target")
+        ]
+
+        for name, balance, target, desc in default_accounts:
+            cursor.execute('''
+                INSERT INTO savings_accounts (name, balance, target, description)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (name) DO NOTHING
+            ''', (name, balance, target, desc))
         
         program_areas = [
             ("Main Account", 0),
