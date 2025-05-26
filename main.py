@@ -3891,26 +3891,10 @@ def get_active_challenge(user_id: int):
         
         challenge = cursor.fetchone()
         if not challenge:
-            raise HTTPException(status_code=404, detail="No active challenge found")
-            
-        # Get milestones
-        cursor.execute('''
-            SELECT id, challenge_id, days, achieved, achieved_date, created_at
-            FROM cold_turkey_milestones
-            WHERE challenge_id = %s
-            ORDER BY days
-        ''', (challenge[0],))
-        
-        milestones = []
-        for row in cursor.fetchall():
-            milestones.append({
-                "id": row[0],
-                "challenge_id": row[1],
-                "days": row[2],
-                "achieved": row[3],
-                "achieved_date": row[4],
-                "created_at": row[5]
-            })
+            raise HTTPException(
+                status_code=404, 
+                detail="No active challenge found. Start a new challenge first."
+            )
             
         return {
             "id": challenge[0],
@@ -3921,9 +3905,10 @@ def get_active_challenge(user_id: int):
             "end_date": challenge[5],
             "status": challenge[6],
             "money_saved": challenge[7],
-            "created_at": challenge[8],
-            "milestones": milestones
+            "created_at": challenge[8]
         }
+    except HTTPException:
+        raise  # Re-raise the 404 exception
     except Exception as e:
         logger.error(f"Error fetching active challenge: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch active challenge")
@@ -4029,18 +4014,18 @@ def get_fintrack_dashboard_summary(user_id: int):
         conn = get_db()
         cursor = conn.cursor()
         
-        # Total savings
+        # Total savings - corrected query
         cursor.execute('SELECT COALESCE(SUM(balance), 0) FROM savings_accounts')
-        total_savings = cursor.fetchone()[0]
+        total_savings = cursor.fetchone()[0] or 0
         
-        # Monthly expenses
+        # Monthly expenses - corrected query
         current_month = datetime.now().strftime("%Y-%m")
         cursor.execute('''
-            SELECT COALESCE(SUM(amount), 0) 
-            FROM expenses 
+            SELECT COALESCE(SUM(e.amount), 0) 
+            FROM expenses e
             WHERE date >= %s AND date < %s
         ''', (f"{current_month}-01", f"{current_month}-31"))
-        monthly_expenses = cursor.fetchone()[0]
+        monthly_expenses = cursor.fetchone()[0] or 0
         
         # Cold turkey streak
         cursor.execute('''
@@ -4053,37 +4038,10 @@ def get_fintrack_dashboard_summary(user_id: int):
         streak_result = cursor.fetchone()
         cold_turkey_days = streak_result[0] if streak_result else 0
         
-        # Recent transactions (combine savings and expenses)
-        cursor.execute('''
-            (SELECT 'savings' as type, id, date, amount, description, transaction_type as category
-             FROM savings_transactions
-             ORDER BY date DESC
-             LIMIT 5)
-            UNION ALL
-            (SELECT 'expense' as type, e.id, e.date, e.amount, e.description, c.name as category
-             FROM expenses e
-             JOIN expense_categories c ON e.category_id = c.id
-             ORDER BY e.date DESC
-             LIMIT 5)
-            ORDER BY date DESC
-            LIMIT 5
-        ''')
-        
-        recent_transactions = []
-        for row in cursor.fetchall():
-            recent_transactions.append({
-                "type": row[0],
-                "date": row[1],
-                "amount": row[2],
-                "description": row[3],
-                "category": row[4]
-            })
-        
         return {
-            "total_savings": total_savings,
-            "monthly_expenses": monthly_expenses,
+            "total_savings": float(total_savings),
+            "monthly_expenses": float(monthly_expenses),
             "cold_turkey_days": cold_turkey_days,
-            "recent_transactions": recent_transactions
         }
     except Exception as e:
         logger.error(f"Error fetching FinTrack dashboard summary: {e}")
@@ -4091,6 +4049,7 @@ def get_fintrack_dashboard_summary(user_id: int):
     finally:
         if conn:
             conn.close()
+            
 @app.get("/expenses/", response_model=List[Expense])
 def get_expenses():
     conn = None
@@ -4098,10 +4057,11 @@ def get_expenses():
         conn = get_db()
         cursor = conn.cursor()
         
+        # Corrected query to match your table structure
         cursor.execute('''
-            SELECT id, category_id, amount, date, description, payment_method, created_at
-            FROM expenses
-            ORDER BY date DESC
+            SELECT e.id, e.category_id, e.amount, e.date, e.description, e.payment_method, e.created_at
+            FROM expenses e
+            ORDER BY e.date DESC
         ''')
         
         expenses = []
@@ -4123,6 +4083,7 @@ def get_expenses():
     finally:
         if conn:
             conn.close()
+
 
 @app.get("/savings/transactions/", response_model=List[SavingsTransaction])
 def get_savings_transactions():
