@@ -3599,6 +3599,500 @@ def request_activity_approval(activity_id: int, requested_by: str = "system"):
         if conn:
             conn.close()
 
+@app.post("/savings/accounts/", response_model=SavingsAccount)
+def create_savings_account(name: str = Form(...), target: Optional[float] = Form(None), 
+                         description: Optional[str] = Form(None)):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO savings_accounts (name, target, description)
+            VALUES (%s, %s, %s)
+            RETURNING id, name, balance, target, description, created_at
+        ''', (name, target, description))
+        
+        new_account = cursor.fetchone()
+        conn.commit()
+        
+        return {
+            "id": new_account[0],
+            "name": new_account[1],
+            "balance": new_account[2],
+            "target": new_account[3],
+            "description": new_account[4],
+            "created_at": new_account[5]
+        }
+    except Exception as e:
+        logger.error(f"Error creating savings account: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/savings/accounts/", response_model=List[SavingsAccount])
+def get_savings_accounts():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, name, balance, target, description, created_at
+            FROM savings_accounts
+            ORDER BY created_at DESC
+        ''')
+        
+        accounts = []
+        for row in cursor.fetchall():
+            accounts.append({
+                "id": row[0],
+                "name": row[1],
+                "balance": row[2],
+                "target": row[3],
+                "description": row[4],
+                "created_at": row[5]
+            })
+            
+        return accounts
+    except Exception as e:
+        logger.error(f"Error fetching savings accounts: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch savings accounts")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/savings/transactions/", response_model=SavingsTransaction)
+def create_savings_transaction(
+    account_id: int = Form(...),
+    amount: float = Form(...),
+    date: date = Form(...),
+    description: Optional[str] = Form(None),
+    transaction_type: str = Form(...)
+):
+    if transaction_type not in ["deposit", "withdrawal"]:
+        raise HTTPException(status_code=400, detail="Transaction type must be 'deposit' or 'withdrawal'")
+    
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verify account exists
+        cursor.execute('SELECT id FROM savings_accounts WHERE id = %s', (account_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Savings account not found")
+        
+        # Create transaction
+        cursor.execute('''
+            INSERT INTO savings_transactions 
+            (account_id, amount, date, description, transaction_type)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, account_id, amount, date, description, transaction_type, created_at
+        ''', (
+            account_id, amount, date, description, transaction_type
+        ))
+        
+        new_transaction = cursor.fetchone()
+        
+        # Update account balance
+        if transaction_type == "deposit":
+            cursor.execute('''
+                UPDATE savings_accounts
+                SET balance = balance + %s
+                WHERE id = %s
+            ''', (amount, account_id))
+        else:
+            # Check if enough balance for withdrawal
+            cursor.execute('SELECT balance FROM savings_accounts WHERE id = %s', (account_id,))
+            current_balance = cursor.fetchone()[0]
+            if current_balance < amount:
+                raise HTTPException(status_code=400, detail="Insufficient funds")
+                
+            cursor.execute('''
+                UPDATE savings_accounts
+                SET balance = balance - %s
+                WHERE id = %s
+            ''', (amount, account_id))
+        
+        conn.commit()
+        
+        return {
+            "id": new_transaction[0],
+            "account_id": new_transaction[1],
+            "amount": new_transaction[2],
+            "date": new_transaction[3],
+            "description": new_transaction[4],
+            "transaction_type": new_transaction[5],
+            "created_at": new_transaction[6]
+        }
+    except Exception as e:
+        logger.error(f"Error creating savings transaction: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+# Expense endpoints
+@app.get("/expenses/categories/", response_model=List[ExpenseCategory])
+def get_expense_categories():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, name, monthly_budget, description, created_at
+            FROM expense_categories
+            ORDER BY name
+        ''')
+        
+        categories = []
+        for row in cursor.fetchall():
+            categories.append({
+                "id": row[0],
+                "name": row[1],
+                "monthly_budget": row[2],
+                "description": row[3],
+                "created_at": row[4]
+            })
+            
+        return categories
+    except Exception as e:
+        logger.error(f"Error fetching expense categories: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch expense categories")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/expenses/", response_model=Expense)
+def create_expense(
+    category_id: int = Form(...),
+    amount: float = Form(...),
+    date: date = Form(...),
+    description: Optional[str] = Form(None),
+    payment_method: str = Form(...)
+):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verify category exists
+        cursor.execute('SELECT id FROM expense_categories WHERE id = %s', (category_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Expense category not found")
+        
+        cursor.execute('''
+            INSERT INTO expenses 
+            (category_id, amount, date, description, payment_method)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, category_id, amount, date, description, payment_method, created_at
+        ''', (
+            category_id, amount, date, description, payment_method
+        ))
+        
+        new_expense = cursor.fetchone()
+        conn.commit()
+        
+        return {
+            "id": new_expense[0],
+            "category_id": new_expense[1],
+            "amount": new_expense[2],
+            "date": new_expense[3],
+            "description": new_expense[4],
+            "payment_method": new_expense[5],
+            "created_at": new_expense[6]
+        }
+    except Exception as e:
+        logger.error(f"Error creating expense: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+# Cold Turkey endpoints
+@app.post("/cold-turkey/challenges/", response_model=ColdTurkeyChallenge)
+def create_cold_turkey_challenge(
+    user_id: int = Form(...),
+    target_category: str = Form(...),
+    target_days: int = Form(...),
+    start_date: date = Form(...)
+):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO cold_turkey_challenges 
+            (user_id, target_category, target_days, start_date, status)
+            VALUES (%s, %s, %s, %s, 'active')
+            RETURNING id, user_id, target_category, target_days, start_date, 
+                      end_date, status, money_saved, created_at
+        ''', (
+            user_id, target_category, target_days, start_date
+        ))
+        
+        new_challenge = cursor.fetchone()
+        
+        # Create milestones (7, 14, 30 days)
+        milestones = [(7,), (14,), (30,)]
+        for days in milestones:
+            cursor.execute('''
+                INSERT INTO cold_turkey_milestones 
+                (challenge_id, days)
+                VALUES (%s, %s)
+            ''', (new_challenge[0], days[0]))
+        
+        conn.commit()
+        
+        return {
+            "id": new_challenge[0],
+            "user_id": new_challenge[1],
+            "target_category": new_challenge[2],
+            "target_days": new_challenge[3],
+            "start_date": new_challenge[4],
+            "end_date": new_challenge[5],
+            "status": new_challenge[6],
+            "money_saved": new_challenge[7],
+            "created_at": new_challenge[8]
+        }
+    except Exception as e:
+        logger.error(f"Error creating cold turkey challenge: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/cold-turkey/challenges/{user_id}/active", response_model=ColdTurkeyChallenge)
+def get_active_challenge(user_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, user_id, target_category, target_days, start_date, 
+                   end_date, status, money_saved, created_at
+            FROM cold_turkey_challenges
+            WHERE user_id = %s AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ''', (user_id,))
+        
+        challenge = cursor.fetchone()
+        if not challenge:
+            raise HTTPException(status_code=404, detail="No active challenge found")
+            
+        # Get milestones
+        cursor.execute('''
+            SELECT id, challenge_id, days, achieved, achieved_date, created_at
+            FROM cold_turkey_milestones
+            WHERE challenge_id = %s
+            ORDER BY days
+        ''', (challenge[0],))
+        
+        milestones = []
+        for row in cursor.fetchall():
+            milestones.append({
+                "id": row[0],
+                "challenge_id": row[1],
+                "days": row[2],
+                "achieved": row[3],
+                "achieved_date": row[4],
+                "created_at": row[5]
+            })
+            
+        return {
+            "id": challenge[0],
+            "user_id": challenge[1],
+            "target_category": challenge[2],
+            "target_days": challenge[3],
+            "start_date": challenge[4],
+            "end_date": challenge[5],
+            "status": challenge[6],
+            "money_saved": challenge[7],
+            "created_at": challenge[8],
+            "milestones": milestones
+        }
+    except Exception as e:
+        logger.error(f"Error fetching active challenge: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch active challenge")
+    finally:
+        if conn:
+            conn.close()
+
+# User settings endpoints
+@app.get("/user/settings/{user_id}", response_model=UserSettings)
+def get_user_settings(user_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT user_id, currency, savings_goals_notifications, 
+                   expense_alerts, dark_mode, updated_at
+            FROM user_settings
+            WHERE user_id = %s
+        ''', (user_id,))
+        
+        settings = cursor.fetchone()
+        if not settings:
+            # Return default settings if not found
+            return {
+                "user_id": user_id,
+                "currency": "USD",
+                "savings_goals_notifications": True,
+                "expense_alerts": True,
+                "dark_mode": False,
+                "updated_at": datetime.now()
+            }
+            
+        return {
+            "user_id": settings[0],
+            "currency": settings[1],
+            "savings_goals_notifications": settings[2],
+            "expense_alerts": settings[3],
+            "dark_mode": settings[4],
+            "updated_at": settings[5]
+        }
+    except Exception as e:
+        logger.error(f"Error fetching user settings: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch user settings")
+    finally:
+        if conn:
+            conn.close()
+
+@app.put("/user/settings/{user_id}", response_model=UserSettings)
+def update_user_settings(
+    user_id: int,
+    currency: str = Form(...),
+    savings_goals_notifications: bool = Form(...),
+    expense_alerts: bool = Form(...),
+    dark_mode: bool = Form(...)
+):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO user_settings 
+            (user_id, currency, savings_goals_notifications, expense_alerts, dark_mode)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET currency = EXCLUDED.currency,
+                savings_goals_notifications = EXCLUDED.savings_goals_notifications,
+                expense_alerts = EXCLUDED.expense_alerts,
+                dark_mode = EXCLUDED.dark_mode,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING user_id, currency, savings_goals_notifications, 
+                      expense_alerts, dark_mode, updated_at
+        ''', (
+            user_id, currency, savings_goals_notifications, expense_alerts, dark_mode
+        ))
+        
+        updated_settings = cursor.fetchone()
+        conn.commit()
+        
+        return {
+            "user_id": updated_settings[0],
+            "currency": updated_settings[1],
+            "savings_goals_notifications": updated_settings[2],
+            "expense_alerts": updated_settings[3],
+            "dark_mode": updated_settings[4],
+            "updated_at": updated_settings[5]
+        }
+    except Exception as e:
+        logger.error(f"Error updating user settings: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/fintrack/dashboard-summary/")
+def get_fintrack_dashboard_summary(user_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Total savings
+        cursor.execute('SELECT COALESCE(SUM(balance), 0) FROM savings_accounts')
+        total_savings = cursor.fetchone()[0]
+        
+        # Monthly expenses
+        current_month = datetime.now().strftime("%Y-%m")
+        cursor.execute('''
+            SELECT COALESCE(SUM(amount), 0) 
+            FROM expenses 
+            WHERE date >= %s AND date < %s
+        ''', (f"{current_month}-01", f"{current_month}-31"))
+        monthly_expenses = cursor.fetchone()[0]
+        
+        # Cold turkey streak
+        cursor.execute('''
+            SELECT EXTRACT(DAY FROM (CURRENT_DATE - start_date)) 
+            FROM cold_turkey_challenges
+            WHERE user_id = %s AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ''', (user_id,))
+        streak_result = cursor.fetchone()
+        cold_turkey_days = streak_result[0] if streak_result else 0
+        
+        # Recent transactions (combine savings and expenses)
+        cursor.execute('''
+            (SELECT 'savings' as type, id, date, amount, description, transaction_type as category
+             FROM savings_transactions
+             ORDER BY date DESC
+             LIMIT 5)
+            UNION ALL
+            (SELECT 'expense' as type, e.id, e.date, e.amount, e.description, c.name as category
+             FROM expenses e
+             JOIN expense_categories c ON e.category_id = c.id
+             ORDER BY e.date DESC
+             LIMIT 5)
+            ORDER BY date DESC
+            LIMIT 5
+        ''')
+        
+        recent_transactions = []
+        for row in cursor.fetchall():
+            recent_transactions.append({
+                "type": row[0],
+                "date": row[1],
+                "amount": row[2],
+                "description": row[3],
+                "category": row[4]
+            })
+        
+        return {
+            "total_savings": total_savings,
+            "monthly_expenses": monthly_expenses,
+            "cold_turkey_days": cold_turkey_days,
+            "recent_transactions": recent_transactions
+        }
+    except Exception as e:
+        logger.error(f"Error fetching FinTrack dashboard summary: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard summary")
+    finally:
+        if conn:
+            conn.close()
+
 # Run the application
 if __name__ == "__main__":
     import uvicorn
