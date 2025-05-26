@@ -777,7 +777,6 @@ def init_db():
             cursor.execute('''
                 INSERT INTO savings_accounts (name, balance, target, description)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (name) DO NOTHING
             ''', (name, balance, target, desc))
         
         program_areas = [
